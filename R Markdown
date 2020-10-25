@@ -1,0 +1,230 @@
+---
+title: "kNN(k Nearest Neighbor)"
+author: "Max Chen"
+date: "2020/10/23"
+output: 
+    html_document:
+        fig_width: 7 #圖片寬度
+        fig_height: 5 #圖片高度
+        theme: cerulean #主題
+        highlight: tango
+        toc: true     #設定標題深度 1~6
+        toc_depth: 3  #標題階層深度(defalut是3)
+        toc_float:
+            collapsed: TRUE   #是否僅顯示top-level 
+            smooth_scroll: False #是否隨著滾輪進行動畫
+---
+
+```{r setup, include=FALSE}
+require(knitr)
+require(kableExtra)
+require(reshape2)
+require(ggplot2)
+require(plotly)
+require(tidyverse)
+require(dplyr)
+require(nsprcomp)
+require(cluster)
+require(factoextra)
+require(gridExtra)
+require(readxl)
+require(magrittr)
+require(plotly)
+require(useful)
+library(GGally)
+library(class) #knn
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE) 
+```
+## kNN 分類簡介
+
+1. KNN ( K nearest neighbor): 其定義為透過K個新數據(鄰居)，多數為某一分類，新數據即為其分類。  
+2. 特徵：即正確判斷分類的屬性。  
+3. 特徵樣本：由特徵值和正確分類所組成的集合，以便告訴機器給機器學習。  
+4. 計算方式：找出與新樣本距離最近的K個特徵樣本，以Cosine Similarity為距離計算公式，即向量內積除以向量長度。  
+ $$ similarity(A,B)= \frac{A*B}{||A||*||B||} =\frac{\sum^{n}_{i=1}(A_i * B_i)} {\sqrt\sum_{i=1}^n (A_i)*\sqrt\sum_{i=1}^n (B_i)}$$
+5. 結論：  
+    a.KNN分類演算法是一個基於實例的演算法，特徵樣本的好壞和樣本當中分類的數量影響分類結果準度，若A類數量大於B分類，可預期K個最近距離鄰居高機率分類為A，分類失去準度。  
+    b.優點為簡單不需要輸入資料假設，對於異常值不敏感，缺點為計算量大，非常耗時且占記憶體空間大。  
+    c.可探討的議題有「參數K值如何選取」，如：資料數的平方根、「如何提升效能」。
+
+***
+
+## 分析資料與問題  
+
+* Problem：透過籃球基礎數據，分類球員位置並且檢視分類正確率
+* Data：NBA 2018-19賽季資料
+* 目標變數(1)：Pos
+* 預測變數(20)："G" "GS" "MP" "FG" "FG." "X3P" "X3P." "X2P" "X2P." "eFG." "FT" "FT." "ORB" "DRB" "AST" "STL" "BLK" "TOV" "PF" "PTS" 
+
+## 分析實作步驟  
+
+1. 資料載入與檢視  
+2. 資料前處理  
+    + 將兩位置球員，如：PF-SF改為單一位置  
+    + 針對變數:X3P, FG., X2P, eFG., FT.的NA值補0  
+    + 刪除轉隊球員資料，僅留下整季的資料  
+    + 刪除相關性為1的預測變數:FGA,X2PA,X3PA,TRB,FG(為所有狀況的合計命中數)
+3. 建立kNN分類模型
+4. 結碖
+
+### 壹.資料載入與檢視
+```{r 匯入NBA2018-19賽季資料作kNN}
+nbaplayer_201819 <- read.csv("/Users/sky/Documents/統計模型實作/資料分群Cluster//NBA Players Stats 201819.csv")
+kable(nbaplayer_201819[1:6, ]) %>% kable_styling(stripe_color = "black") %>% scroll_box(height = "200px")
+dim(nbaplayer_201819)
+```
+
+### 貳.資料前處理  
+```{r}
+nbaplayer_201819[grep("-", nbaplayer_201819$Pos), c("Player", "Pos")]
+```
+
+* **由於有8位預定Pos只會有C, PF, SF, SG, PG，故將重複位置之球員修改為一個位置(詢問較為熟悉球員打法朋友)，並且將變數Pos轉變為factor類型變數**  
+
+```{r, echo = TRUE}
+nbaplayer_201819[39, "Pos"] <- "SF"  #Harrison Barnes
+nbaplayer_201819[103, "Pos"] <- "SG"  #Jimmy Butler
+nbaplayer_201819[129, "Pos"] <- "SF"  #Wilson Chandler
+nbaplayer_201819[379, "Pos"] <- "SG" #Kyle Kover
+nbaplayer_201819[427, "Pos"] <- "C"  #Thon Maker
+nbaplayer_201819[437, "Pos"] <- "SG" #Wesley Matthews
+nbaplayer_201819[600, "Pos"] <- "SF" #Jonathon Simmons
+nbaplayer_201819[611, "Pos"] <- "PF" #Jason Smith
+nbaplayer_201819$Pos <- factor(nbaplayer_201819$Pos, levels = c("C", "PF", "SF", "SG", "PG"))
+summary(nbaplayer_201819$Pos)
+```
+
+* **分類各位置球員數如上表，檢視目前有79筆資料有NA值，後續處理**
+
+```{r }
+ggplot(data = nbaplayer_201819, aes(x = Pos)) + geom_bar(aes(fill = Pos)) + theme_bw(base_size = 14) + 
+    labs(title = "各位置人數", x = "場上位置", y = "球員人數") + 
+    theme(text = element_text(family = "黑體-繁 中黑"))
+
+table(complete.cases(nbaplayer_201819))
+```
+
+* **若有NA值補0，因為該季整季無出手導致命中率無資料**
+
+```{r}
+nbaplayer_201819[is.na(nbaplayer_201819$FG.), "FG."] <- 0
+nbaplayer_201819[is.na(nbaplayer_201819$X3P.), "X3P."] <- 0
+nbaplayer_201819[is.na(nbaplayer_201819$X2P.), "X2P."] <- 0
+nbaplayer_201819[is.na(nbaplayer_201819$eFG.), "eFG."] <- 0
+nbaplayer_201819[is.na(nbaplayer_201819$FT.), "FT."] <- 0
+table(complete.cases(nbaplayer_201819))
+```
+
+* **因為球員球季中會被交易轉隊，故會有轉隊總和數據(TOT)，共計86為球員**  
+```{r}
+nbaplayer_201819[nbaplayer_201819$Tm == "TOT", "Player"]
+length(nbaplayer_201819[nbaplayer_201819$Tm == "TOT", "Player"])
+#nbaplayer_201819[nbaplayer_201819$Tm == "TOT", ]
+```
+
+* **留下總和數據即可，因此刪除重複資料，資料清洗後為530筆球員資料**
+```{r }
+table(duplicated(nbaplayer_201819$Player))  #觀察名字為一值僅530筆，故重複了178筆
+repindex <- which(duplicated(nbaplayer_201819$Player)) #返回索引值
+nbaplayer_201819 <- nbaplayer_201819[-repindex, ] #刪除重複的球員名稱(轉隊)，留下總和資料
+```
+
+* **資料為530筆，欄位變數為30個，後續會再針對相關過高之變數刪除**  
+```{r}
+dim(nbaplayer_201819)
+```
+
+**檢視預測變數的相關性**
+
+```{r}
+#layout.exp 參數為針對變數標籤左側空出n個空白格; size為變量標籤大小;(nbreaks = 4, palette = "RdGy")需搭配使用
+ggcorr(data = nbaplayer_201819[, 6:ncol(nbaplayer_201819)], geom = "blank",label = T, 
+       hjust = 0.7, size = 3, layout.exp = 3, label_size = 3) +
+    geom_point(size = 6, aes(color = coefficient > 0, alpha = abs(coefficient) >= 0.9)) + #框色大小
+    scale_alpha_manual(values = c("TRUE" = 0.5, "FALSE" = 0)) + #標記的透明度
+    guides(color = FALSE, alpha = FALSE)  
+
+```
+
+* **剔除相關係數為1之基礎變數:*FGA,X2PA,X3PA,TRB,FG***  
+
+```{r}
+nbaplayer_201819_V1 <- nbaplayer_201819[, -c(10,13,16, 20, 24)]
+kable(nbaplayer_201819_V1[1:6, ]) %>% kable_styling(stripe_color = "black") %>% scroll_box(height = "200px")
+summary(nbaplayer_201819_V1[,3:ncol(nbaplayer_201819_V1)])
+```
+
+
+```{r}
+nbaplayer_201819_V2 <- nbaplayer_201819_V1[, -c(1:5)] %>% scale() # 標準化動作 (這邊要特別注意標準化後的格式已轉成matrix)
+kable(nbaplayer_201819_V2[1:6, ]) %>% kable_styling(stripe_color = "black") %>% scroll_box(height = "200px")
+```
+
+* **因為變數欄位參雜得分、次數及各項比率，故將資料進行標準化動作，將尺度一致化**  
+* **檢視資料是否已標準化，取前六筆資料觀察**  
+
+### 参.建立kNN分類模型
+    `knn(train, test, cl, k = 1, l = 0, prob = FALSE, use.all = TRUE)`
+    
+* **建立kNN模型第三個參數:training set和testing set 的正確分類，以便後續模型和混淆矩陣使用**  
+```{r , echo = T}
+pos <- nbaplayer_201819_V1[, 3] #產製單一分類變數train.pos作為後續KNN model的第三個參數樣本
+```
+
+  
+
+* **依序建立kNN模型的三個參數資料，以配適kNN模型中**   
+
+```{r 設定隨機種子以固定70%訓練集, echo = T}
+set.seed(168)
+index <- sample(nrow(nbaplayer_201819_V2), 0.7 * nrow(nbaplayer_201819_V2))
+
+train.set <- nbaplayer_201819_V2[index, ] #training set KNN第一個參數
+
+test.set <- nbaplayer_201819_V2[-index, ] #test set KNN第二個參數
+
+train.pos <- pos[index]           #training set正確答案，KNN第三個參數
+test.pos <- pos[-index]           #真實答案，作為後面混淆矩陣對照 (這邊也要注意格式轉換，目前仍為tibble)
+```
+
+
+* **另外為找出最適k值，使用*Elbow Method*來選擇最適合的k值**  
+```{r}
+predicted.pos = NULL
+error.rate <- numeric(0)
+for (i in 1:20) {
+    set.seed(168)
+    predicted.pos <- knn(train.set, test.set, as.matrix(train.pos), k = i)
+    error.rate[i] <- mean(as.matrix(test.pos) != predicted.pos)
+}
+print(error.rate)
+k.values <- 1:20
+error.tb <- tibble(k.values, error.rate)
+ggplot(error.tb, aes(x = k.values, y = error.rate)) + geom_point(size = 0.8) + 
+    geom_text(aes(label = k.values), vjust = 3, size = 2, colour = "red") +
+    geom_line(lty = "dotted", colour = 'blue') +theme_bw()
+```
+
+* **觀察圖形得到當k值為11, error.rate皆為最低43.40%，下面建立Confusion Matrix**  
+
+
+```{r}
+predicted.pos <- knn(train.set, test.set, as.matrix(train.pos), k = 11) 
+postable <- table(as.matrix(test.pos), predicted.pos, dnn = c("預測", "實際"))
+accuracy <- sum(diag(postable))/sum(postable) 
+kable(postable) %>% kable_styling() %>% scroll_box(height = "250px")
+accuracy
+```
+
+
+
+
+### 肆.結論：
+    
+    
+    1.另外SF這個位置有10個人被分為PF，表示這位置的選手很多事PF兼打SF，所以正確率比較低   
+    2.位置SF分類不明確，主要其位置介於SG, PF之間，且該位置球員資料較少，導致計算機在解讀時叫不明確  
+    3.最終得到正確率57.23%，顯示將相關性過高之解釋變數刪除，有效將球員位置分類，後續可探討作變數維度降低，如：主成分PCA分析  
+
+
+***
